@@ -214,6 +214,112 @@ async def generate_cma_with_pdf(request: CMARequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating CMA: {str(e)}")
 
+@app.post("/generate-cma-base64")
+async def generate_cma_base64(request: CMARequest):
+    """
+    Generate a CMA report and return the PDF as base64 string
+    
+    Returns:
+    {
+        "success": true,
+        "data": { ... CMA analysis data ... },
+        "pdf_base64": "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC...",
+        "filename": "cma_report_form_address.pdf"
+    }
+    """
+    try:
+        import base64
+        
+        # Get absolute path to CSV file
+        csv_path = os.path.join(os.path.dirname(__file__), "properties.csv")
+        
+        # Verify CSV exists
+        if not os.path.exists(csv_path):
+            raise HTTPException(
+                status_code=500, 
+                detail=f"CSV file not found at {csv_path}"
+            )
+        
+        # Prepare subject data in CSV format
+        subject_csv = {
+            "ID": request.subject.id,
+            "Lot size (M^2)": request.subject.lot_size_m2,
+            "Built up size (M^2)": request.subject.built_up_size_m2,
+            "Bedrooms": request.subject.bedrooms,
+            "Baths": request.subject.baths,
+            "Latitude": request.subject.latitude,
+            "Longitude": request.subject.longitude,
+        }
+        
+        if request.subject.price:
+            subject_csv["Price ($)"] = request.subject.price
+        
+        if request.subject.image_url:
+            subject_csv["Image URL"] = request.subject.image_url
+        
+        # Create temporary output file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            output_path = tmp.name
+        
+        # Prepare parameters
+        params = {
+            "csv": csv_path,
+            "out": output_path,
+            "subject_csv": subject_csv,
+            "top_n": request.top_n,
+            "start_radius_km": request.start_radius_km,
+            "step_km": request.step_km,
+            "max_radius_km": request.max_radius_km,
+            "size_tol_land": request.size_tol_land,
+            "size_tol_built": request.size_tol_built,
+            "min_required": request.min_required,
+            "price_iqr_k": request.price_iqr_k,
+        }
+        
+        # Generate CMA report
+        result = run_cma_from_params(params)
+        
+        # Read the PDF file and convert to base64
+        pdf_base64 = None
+        if os.path.exists(output_path):
+            with open(output_path, 'rb') as pdf_file:
+                pdf_bytes = pdf_file.read()
+                pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+            
+            # Clean up the temporary file
+            try:
+                os.unlink(output_path)
+            except:
+                pass
+        
+        # Clean the results and prepare response
+        response_data = {
+            "success": True,
+            "data": {
+                "target_id": result["target_id"],
+                "asking_price": clean_float(result.get("ask")),
+                "average_comparable_price": clean_float(result.get("avg_price")),
+                "discount_percentage": clean_float(result.get("discount_pct")),
+                "discount_amount": clean_float(result.get("discount_abs")),
+                "comparable_price_range": {
+                    "low": clean_float(result.get("comp_low")),
+                    "high": clean_float(result.get("comp_high"))
+                }
+            },
+            "pdf_base64": pdf_base64,
+            "filename": f"cma_report_{result['target_id']}.pdf",
+            "message": "CMA report generated successfully"
+        }
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Error generating CMA: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        raise HTTPException(status_code=500, detail=error_detail)
+
 @app.get("/health")
 async def health_check():
     """Detailed health check"""
