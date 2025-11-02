@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 import os
 import tempfile
 import sys
+import math
 
 # Import your existing script functions
 from free_top_deals_cma_report import run_cma_from_params
@@ -14,6 +15,27 @@ app = FastAPI(
     description="Generate Comparative Market Analysis reports for real estate properties",
     version="1.0.0"
 )
+
+def clean_float(value):
+    """Convert NaN and Infinity to None for JSON compliance"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if math.isnan(value) or math.isinf(value):
+            return None
+    return value
+
+def clean_result_dict(data: dict) -> dict:
+    """Recursively clean all float values in a dictionary"""
+    cleaned = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            cleaned[key] = clean_result_dict(value)
+        elif isinstance(value, (list, tuple)):
+            cleaned[key] = [clean_float(v) if isinstance(v, (int, float)) else v for v in value]
+        else:
+            cleaned[key] = clean_float(value)
+    return cleaned
 
 class SubjectProperty(BaseModel):
     """Subject property details"""
@@ -59,6 +81,16 @@ async def generate_cma(request: CMARequest):
     - PDF report (optional)
     """
     try:
+        # Get absolute path to CSV file
+        csv_path = os.path.join(os.path.dirname(__file__), "properties.csv")
+        
+        # Verify CSV exists
+        if not os.path.exists(csv_path):
+            raise HTTPException(
+                status_code=500, 
+                detail=f"CSV file not found at {csv_path}. Working directory: {os.getcwd()}"
+            )
+        
         # Prepare subject data in CSV format
         subject_csv = {
             "ID": request.subject.id,
@@ -82,7 +114,7 @@ async def generate_cma(request: CMARequest):
         
         # Prepare parameters
         params = {
-            "csv": "properties.csv",  # Should be uploaded or configured
+            "csv": csv_path,  # Use absolute path
             "out": output_path,
             "subject_csv": subject_csv,
             "top_n": request.top_n,
@@ -98,26 +130,32 @@ async def generate_cma(request: CMARequest):
         # Generate CMA report
         result = run_cma_from_params(params)
         
-        # Return results (without PDF for now)
-        return {
+        # Clean the results to handle NaN/Infinity values
+        response_data = {
             "success": True,
             "data": {
                 "target_id": result["target_id"],
-                "asking_price": result["ask"],
-                "average_comparable_price": result["avg_price"],
-                "discount_percentage": result["discount_pct"],
-                "discount_amount": result["discount_abs"],
+                "asking_price": clean_float(result.get("ask")),
+                "average_comparable_price": clean_float(result.get("avg_price")),
+                "discount_percentage": clean_float(result.get("discount_pct")),
+                "discount_amount": clean_float(result.get("discount_abs")),
                 "comparable_price_range": {
-                    "low": result["comp_low"],
-                    "high": result["comp_high"]
+                    "low": clean_float(result.get("comp_low")),
+                    "high": clean_float(result.get("comp_high"))
                 }
             },
             "pdf_generated": os.path.exists(output_path),
             "message": "CMA report generated successfully"
         }
         
+        return response_data
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating CMA: {str(e)}")
+        import traceback
+        error_detail = f"Error generating CMA: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.post("/generate-cma-with-pdf")
 async def generate_cma_with_pdf(request: CMARequest):
@@ -144,8 +182,11 @@ async def generate_cma_with_pdf(request: CMARequest):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             output_path = tmp.name
         
+        # Get absolute path to CSV file
+        csv_path = os.path.join(os.path.dirname(__file__), "properties.csv")
+        
         params = {
-            "csv": "properties.csv",
+            "csv": csv_path,  # Use absolute path
             "out": output_path,
             "subject_csv": subject_csv,
             "top_n": request.top_n,
@@ -176,10 +217,15 @@ async def generate_cma_with_pdf(request: CMARequest):
 @app.get("/health")
 async def health_check():
     """Detailed health check"""
+    csv_path = os.path.join(os.path.dirname(__file__), "properties.csv")
     return {
         "status": "healthy",
-        "csv_exists": os.path.exists("properties.csv"),
-        "temp_dir_writable": os.access(tempfile.gettempdir(), os.W_OK)
+        "working_directory": os.getcwd(),
+        "script_directory": os.path.dirname(__file__),
+        "csv_path": csv_path,
+        "csv_exists": os.path.exists(csv_path),
+        "temp_dir_writable": os.access(tempfile.gettempdir(), os.W_OK),
+        "files_in_directory": os.listdir(os.path.dirname(__file__) or '.')
     }
 
 if __name__ == "__main__":
