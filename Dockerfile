@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY free_top_deals_cma_report.py .
 COPY api.py .
 COPY properties.csv .
-COPY Screenshot_69.png . 
+COPY logo_transparent_background.png . 
 
 # Expose port
 EXPOSE 8000
