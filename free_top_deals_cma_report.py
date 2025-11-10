@@ -345,12 +345,11 @@ def build_comps(
     start_radius_km: float = 1.0,
     step_km: float = 1.0,
     max_radius_km: float = 25.0,
-    size_tol_land: float = 200.0,
-    size_tol_built: float = 100.0,
+    size_tol_land: float = 0.20,   # now interpreted as % of subject land (20%)
+    size_tol_built: float = 0.20,  # now interpreted as % of subject built (20%)
     min_required: int = 3,
     price_iqr_k: float = 0.5,
 ) -> pd.DataFrame:
-
     out_cols = ["similar_id","price","beds","baths","land_m2","built_m2","distance_km","status","lat","lon","link"]
 
     try:
@@ -379,11 +378,23 @@ def build_comps(
     if comps.empty:
         return pd.DataFrame(columns=out_cols)
 
-    comps["distance_km"] = comps.apply(lambda r: haversine_km(slat, slon, float(r["lat"]), float(r["lon"])), axis=1)
+    # distance
+    comps["distance_km"] = comps.apply(
+        lambda r: haversine_km(slat, slon, float(r["lat"]), float(r["lon"])),
+        axis=1
+    )
+
+    # --- key change: relative 20% tolerance ---
+    # if subject land is 500 m2 and tol is 0.20 -> allow 500 * 0.20 = 100 m2 deviation
+    land_abs_tol  = s_land * size_tol_land if np.isfinite(s_land) else np.inf
+    built_abs_tol = s_built * size_tol_built if np.isfinite(s_built) else np.inf
 
     def _within_tol(r):
-        return (abs(float(r["land_m2"]) - s_land) <= size_tol_land and
-                abs(float(r["built_m2"]) - s_built) <= size_tol_built)
+        return (
+            abs(float(r["land_m2"]) - s_land)  <= land_abs_tol
+            and
+            abs(float(r["built_m2"]) - s_built) <= built_abs_tol
+        )
 
     radius = start_radius_km
     selected = pd.DataFrame()
@@ -398,29 +409,6 @@ def build_comps(
             selected = pool.nsmallest(len(pool), "distance_km")
             pool_final_radius = radius
         radius += step_km
-
-    if selected.empty or len(selected) < min_required:
-        return pd.DataFrame(columns=out_cols)
-
-    def _iqr_bounds(series: pd.Series, k: float) -> tuple:
-        q1 = np.nanpercentile(series.values, 25)
-        q3 = np.nanpercentile(series.values, 75)
-        iqr = q3 - q1
-        return q1 - k*iqr, q3 + k*iqr
-
-    pool_for_iqr = selected.copy()
-    if pool_final_radius is not None:
-        pool_for_iqr = comps[(comps["distance_km"] <= pool_final_radius) & comps.apply(_within_tol, axis=1)].copy()
-
-    if len(pool_for_iqr) >= 3:
-        low, high = _iqr_bounds(pool_for_iqr["price"], price_iqr_k)
-        selected = selected[(selected["price"] >= low) & (selected["price"] <= high)].copy()
-        if len(selected) < min_required:
-            refill_pool = pool_for_iqr[(pool_for_iqr["price"] >= low) & (pool_for_iqr["price"] <= high)]
-            already = set(selected["similar_id"].astype(str))
-            refill_pool = refill_pool[~refill_pool["similar_id"].astype(str).isin(already)]
-            refill = refill_pool.nsmallest(max(0, top_n - len(selected)), "distance_km")
-            selected = pd.concat([selected, refill], ignore_index=True)
 
     if selected.empty or len(selected) < min_required:
         return pd.DataFrame(columns=out_cols)
@@ -482,16 +470,14 @@ def _build_summary_text(subject: Dict[str, Any], comps: pd.DataFrame,
     sign = "-" if (np.isfinite(disc_pct) and disc_pct >= 0) else ("+" if np.isfinite(disc_pct) else "")
     pct = f" ({sign}{_num(abs(disc_pct), 1)}%)" if np.isfinite(disc_pct) else ""
 
-    third = f"The subject property is listed at {_currency(ask)}."
-    if direction:
-        third = f"The subject property is listed at {_currency(ask)}, which is {delta_money}{direction}{pct} than the average."
 
     lines = [
         f"We compared the subject property to {n} similar listings nearby (nearest at {_num(nearest_km, 1)} km).",
+        f"The typical comparable size: {_num(land_avg)} m² lot and {_num(built_avg)} m² built, with {_num(beds_avg,1)} bedrooms and {_num(baths_avg,1)} bathrooms.",
         f"The average asking price of these comparables is {_currency(avg_price)} (range {_currency(p_lo)}-{_currency(p_hi)}).",
-        third,
-        f"Typical comparable size: {_num(land_avg)} m² lot and {_num(built_avg)} m² built, with {_num(beds_avg,1)} bedrooms and {_num(baths_avg,1)} bathrooms.",
-        _plain_verdict(disc_pct),
+        f"The recommended asking price for the subject property is {_currency(avg_price)}, however without "
+        f"The market value in an appraisal report should not fall far from this range unless supported by verifiable evidence."
+        #_plain_verdict(disc_pct),
     ]
     return " ".join([l.strip() for l in lines if l.strip()])
 
@@ -500,6 +486,8 @@ class CMAReport(FPDF):
         bar_top, bar_h = 10, 26
         self.set_fill_color(*BRAND_BLACK)
         self.rect(LEFT_MARGIN, bar_top, CONTENT_W, bar_h, "F")
+
+        # --- Logo in center ---
         if os.path.exists(APA_LOGO_PATH):
             try:
                 with Image.open(APA_LOGO_PATH) as im:
@@ -512,23 +500,69 @@ class CMAReport(FPDF):
                 self.image(APA_LOGO_PATH, x=x_logo, y=y_logo, h=logo_h_mm)
             except Exception:
                 pass
+
+        # tagline
         self.set_text_color(*BRAND_WHITE)
         self.set_font("Helvetica", "", 9)
         self.set_xy(LEFT_MARGIN, bar_top + bar_h - 6)
         self.cell(CONTENT_W, 5, "Independent, data-backed valuation reports.", align="C")
-        self.set_text_color(0, 0, 0)
-        self.set_y(bar_top + bar_h + 2)
 
+        # reset text color
+        self.set_text_color(0, 0, 0)
+
+        # ================= DISCLAIMER BANNER =================
+        disclaimer_text = (
+            "This report was automatically generated by Aruba Property Appraisals (APA) using client-provided data to present an indicative price range based on comparable properties. To determine the exact market value, a formal appraisal is required. APA cannot verify the accuracy of the client-provided information; please contact APA for verification or to request an appraisal."
+        )
+
+        banner_y = bar_top + bar_h + 2
+        banner_x = LEFT_MARGIN
+        banner_w = CONTENT_W
+
+        # text settings
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(40, 40, 40)
+
+        # 1) remember start position
+        self.set_xy(banner_x + 2, banner_y + 2)
+        start_y = self.get_y()
+
+        # 2) write the text (this will advance Y depending on wrapping)
+        self.multi_cell(banner_w - 4, 4, disclaimer_text, align="L")
+
+        # 3) measure how tall it became
+        end_y = self.get_y()
+        text_height = end_y - start_y
+
+        # 4) draw the background *behind* it with proper height
+        # add 4px padding (2 top, 2 bottom)
+        box_height = text_height + 4
+        self.set_fill_color(245, 245, 245)
+        self.set_draw_color(210, 210, 210)
+        self.set_line_width(0.2)
+        # draw the rect
+        self.rect(banner_x, banner_y, banner_w, box_height, style="DF")
+
+        # 5) reprint the text on top OR move the text drawing before rect?
+        # easiest is: redraw text
+        self.set_xy(banner_x + 2, banner_y + 2)
+        self.set_text_color(40, 40, 40)
+        self.multi_cell(banner_w - 4, 4, disclaimer_text, align="L")
+
+        # 6) move cursor below banner
+        self.set_y(banner_y + box_height + 2)
+        
+    # -----------------------------------------------------------
     def footer(self):
-        self.set_y(-15)
+        self.set_y(-10)
         self.set_font("Helvetica", "", 8)
         now = datetime.now()
         self.cell(0, 6, f"CMA Report created on {now.strftime('%B')} {now.day}, {now.year}.", align="C", ln=1)
-        self.set_y(-20)
+        self.set_y(-12)
         self.set_draw_color(200, 200, 200)
         self.set_line_width(0.2)
         self.line(10, self.get_y(), 200, self.get_y())
-
+        
 def _table_fullwidth(pdf: CMAReport, headers, rows,
                      alignments=None, header_fill=BRAND_BLACK,
                      min_col_w: float = 15.0,
@@ -790,7 +824,7 @@ def generate_cma_report(subject: Dict[str, Any], comps: pd.DataFrame, output_pat
         doc.multi_cell(
             0, 6,
             f"ID: {_extract_id(subject.get('id','-'))}   "
-            f"Price: {_currency(ask)}   "
+            #f"Price: {_currency(ask)}   "
             f"Beds/Baths: {subject.get('beds','-')}/{subject.get('baths','-')}   "
             f"Land: {_num(subject.get('land_m2'),0)} m²   "
             f"Built: {_num(subject.get('built_m2'),0)} m²"
@@ -944,7 +978,7 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
     p = {
         "csv": params.get("csv", "properties.csv"),
         "id": params.get("id"),
-        "subject_csv": params.get("subject_csv"),  # NEW: dict shaped like a CSV row
+        "subject_csv": params.get("subject_csv"),
         "out": params.get("out", "cma.pdf"),
         "prepare_export": bool(params.get("prepare_export", False)),
         "export_path": params.get("export_path", "rankings.csv"),
@@ -953,8 +987,9 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "start_radius_km": float(params.get("start_radius_km", 1.0)),
         "step_km": float(params.get("step_km", 1.0)),
         "max_radius_km": float(params.get("max_radius_km", 25.0)),
-        "size_tol_land": float(params.get("size_tol_land", 200.0)),
-        "size_tol_built": float(params.get("size_tol_built", 100.0)),
+        # changed to 20%:
+        "size_tol_land": float(params.get("size_tol_land", 0.20)),
+        "size_tol_built": float(params.get("size_tol_built", 0.20)),
         "min_required": int(params.get("min_required", 3)),
         "price_iqr_k": float(params.get("price_iqr_k", 0.5)),
     }
@@ -1051,4 +1086,4 @@ if __name__ == "__main__":
     res = run_cma_from_params(form_submit)
     print(res)
     
-
+    
