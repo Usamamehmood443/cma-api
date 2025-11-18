@@ -32,6 +32,7 @@ BRAND_AQUA     = (0, 210, 232)
 BRAND_DIVIDER  = (60, 60, 60)
 
 # Optional logo (safe if missing)
+#APA_LOGO_PATH = r"C:\Users\GM\Desktop\Top Deals Aruba\img\aruba_property_appraisals_logo.png"
 APA_LOGO_PATH = "logo_transparent_background.png"
 
 # -------------------- Utilities --------------------
@@ -344,7 +345,7 @@ def build_comps(
     top_n: int = 5,
     start_radius_km: float = 1.0,
     step_km: float = 1.0,
-    max_radius_km: float = 25.0,
+    max_radius_km: float = 2.5,
     size_tol_land: float = 0.20,   # now interpreted as % of subject land (20%)
     size_tol_built: float = 0.20,  # now interpreted as % of subject built (20%)
     min_required: int = 3,
@@ -473,12 +474,11 @@ def _build_summary_text(subject: Dict[str, Any], comps: pd.DataFrame,
 
     lines = [
         f"We compared the subject property to {n} similar listings nearby (nearest at {_num(nearest_km, 1)} km).",
+        "When selecting comparables, we evaluate lot size, built-up area, and distance from the subject property.",
         f"The typical comparable size: {_num(land_avg)} m² lot and {_num(built_avg)} m² built, with {_num(beds_avg,1)} bedrooms and {_num(baths_avg,1)} bathrooms.",
         f"The average asking price of these comparables is {_currency(avg_price)} (range {_currency(p_lo)}-{_currency(p_hi)}).",
-        f"The recommended asking price for the subject property is {_currency(avg_price)}, however without "
-        f"The market value in an appraisal report should not fall far from this range unless supported by verifiable evidence."
-        #_plain_verdict(disc_pct),
     ]
+
     return " ".join([l.strip() for l in lines if l.strip()])
 
 class CMAReport(FPDF):
@@ -983,10 +983,10 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "prepare_export": bool(params.get("prepare_export", False)),
         "export_path": params.get("export_path", "rankings.csv"),
         "generate_all_pdfs": bool(params.get("generate_all_pdfs", False)),
-        "top_n": int(params.get("top_n", 5)),
+        "top_n": int(params.get("top_n", 3)),
         "start_radius_km": float(params.get("start_radius_km", 1.0)),
         "step_km": float(params.get("step_km", 1.0)),
-        "max_radius_km": float(params.get("max_radius_km", 25.0)),
+        "max_radius_km": float(params.get("max_radius_km", 5.0)),
         # changed to 20%:
         "size_tol_land": float(params.get("size_tol_land", 0.20)),
         "size_tol_built": float(params.get("size_tol_built", 0.20)),
@@ -1067,19 +1067,20 @@ if __name__ == "__main__":
     print(res)
     '''
     
+    #, 
     # EXAMPLE 2 — Subject is NOT in the CSV: pass a CSV-like dict
     form_submit = {
         "csv": "properties.csv",
         "out": "reports/cma_new_subject.pdf",
         "subject_csv": {
             "ID": "form address",
-            "Lot size (M^2)": 459,
-            "Built up size (M^2)": 133,
-            "Bedrooms": 4,
-            "Baths": 4,
-            "Latitude": 12.5440,
-            "Longitude": -70.0130,
-            "Image URL": "https://example.com/subject.jpg"  # to be provided by client (saved in media manager)
+            "Lot size (M^2)": 574,
+            "Built up size (M^2)": 140,
+            "Bedrooms": 3,
+            "Baths": 3,
+            "Latitude": 12.547138,
+            "Longitude": -70.050639,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
         },
     }
 
