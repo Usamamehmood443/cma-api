@@ -1119,7 +1119,7 @@ if __name__ == "__main__":
         "subject_csv": {
             "ID": "form address",
             "Lot size (M^2)": 1000,
-            "Built up size (M^2)": 300,
+            "Built up size (M^2)": 598,
             "Bedrooms": 6,
             "Baths": 5,
             "Latitude": 12.5506,
