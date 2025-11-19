@@ -84,20 +84,6 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
          + math.cos(lat1*p)*math.cos(lat2*p)*math.sin(dlon/2)**2)
     return 2 * R * math.asin(math.sqrt(a))
 
-'''
-def extract_number_before_m(val):
-    if pd.isna(val):
-        return pd.NA
-    s = str(val).strip().lower()
-    m = re.search(r"([\d.,]+)\s*m", s)
-    if not m:
-        return pd.NA
-    num = m.group(1).replace(",", "")
-    try:
-        return float(num)
-    except ValueError:
-        return pd.NA
-'''
 
 def extract_number_before_m(val):
     if pd.isna(val):
@@ -470,6 +456,7 @@ def build_comps(
     return selected.loc[:, out_cols].nsmallest(
         min(top_n, len(selected)), "distance_km"
     ).copy()
+
 
 
 # -------------------- PDF bits --------------------
@@ -1039,12 +1026,10 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "top_n": int(params.get("top_n", 3)),
         "start_radius_km": float(params.get("start_radius_km", 1.0)),
         "step_km": float(params.get("step_km", 1.0)),
-        "max_radius_km": float(params.get("max_radius_km", 5.0)),
-        # changed to 20%:
+        "max_radius_km": float(params.get("max_radius_km", 10)),
         "size_tol_land": float(params.get("size_tol_land", 0.20)),
         "size_tol_built": float(params.get("size_tol_built", 0.20)),
-        "min_required": int(params.get("min_required", 3)),
-        "price_iqr_k": float(params.get("price_iqr_k", 0.5)),
+        "min_required": int(params.get("min_required", 3))
     }
     if not p["csv"]:
         raise ValueError("csv path is required for comps pool.")
@@ -1079,12 +1064,17 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
 
     # 4) comps for subject
     comps = build_comps(
-        df_norm, subject,
-        top_n=p["top_n"], start_radius_km=p["start_radius_km"],
-        step_km=p["step_km"], max_radius_km=p["max_radius_km"],
-        size_tol_land=p["size_tol_land"], size_tol_built=p["size_tol_built"],
-        min_required=p["min_required"], price_iqr_k=p["price_iqr_k"]
+        df_norm, 
+        subject,
+        top_n=p["top_n"],
+        start_radius_km=p["start_radius_km"],
+        step_km=p["step_km"],
+        max_radius_km=p["max_radius_km"],
+        size_tol_land=p["size_tol_land"],
+        size_tol_built=p["size_tol_built"],
+        min_required=p["min_required"]
     )
+
     if comps.empty:
         raise RuntimeError("Not enough comparable properties for the subject; no PDF generated.")
 
@@ -1104,41 +1094,10 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "all_pdfs": [],
     }
 
-
-# -------------------- MAIN --------------------
-
 # -------------------- MAIN --------------------
 if __name__ == "__main__":
-    
-    '''
-    # EXAMPLE 1 — Subject is IN the CSV (pick by ID), default tuning
-    res = run_cma_from_params({
-        "csv": "properties.csv",
-        "id": "13833",              # after normalization (your _extract_id rules)
-        "out": "reports/cma_13833.pdf",
-    })
-    print(res)
-    '''
-    
-    #, 
-    # EXAMPLE 2 — Subject is NOT in the CSV: pass a CSV-like dict
-    '''
-    form_submit = {
-        "csv": "properties.csv",
-        "out": "reports/cma_new_subject.pdf",
-        "subject_csv": {
-            "ID": "form address",
-            "Lot size (M^2)": 574,
-            "Built up size (M^2)": 140,
-            "Bedrooms": 3,
-            "Baths": 3,
-            "Latitude": 12.547138,
-            "Longitude": -70.050639,
-            "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
-        },
-    }
-    '''
 
+    '''    
     form_submit = {
         "csv": "properties.csv",
         "out": "reports/cma_new_subject.pdf",
@@ -1153,8 +1112,27 @@ if __name__ == "__main__":
             "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
         },
     }
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "form address",
+            "Lot size (M^2)": 1000,
+            "Built up size (M^2)": 300,
+            "Bedrooms": 6,
+            "Baths": 5,
+            "Latitude": 12.5506,
+            "Longitude": -70.0502,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
+        },
+    }
 
 
+
+    
+
+    
     res = run_cma_from_params(form_submit)
     print(res)
     
