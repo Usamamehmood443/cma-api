@@ -346,13 +346,29 @@ def build_comps(
     start_radius_km: float = 1.0,
     step_km: float = 1.0,
     max_radius_km: float = 2.5,
-    size_tol_land: float = 0.20,   # now interpreted as % of subject land (20%)
-    size_tol_built: float = 0.20,  # now interpreted as % of subject built (20%)
+    size_tol_land: float = 0.20,   # interpreted as 20% band (see below)
+    size_tol_built: float = 0.20,  # interpreted as 20% band (see below)
     min_required: int = 3,
     price_iqr_k: float = 0.5,
 ) -> pd.DataFrame:
-    out_cols = ["similar_id","price","beds","baths","land_m2","built_m2","distance_km","status","lat","lon","link"]
+    """
+    Build comparable set around `subject`:
+      - same type as subject
+      - within a growing radius (start_radius_km → max_radius_km)
+      - lot and built-up area within ±size tolerance (default ±20%)
+      - returns up to `top_n` closest by distance
 
+    size_tol_land / size_tol_built:
+      - If value <= 1, treated as a FRACTION (0.20 = 20%)
+      - If value > 1, treated as PERCENT (20 = 20%)
+    """
+    out_cols = [
+        "similar_id", "price", "beds", "baths",
+        "land_m2", "built_m2", "distance_km",
+        "status", "lat", "lon", "link"
+    ]
+
+    # --- extract subject core values ---
     try:
         s_land  = float(subject.get("land_m2"))
         s_built = float(subject.get("built_m2"))
@@ -360,64 +376,101 @@ def build_comps(
         slon    = float(subject.get("lon"))
     except Exception:
         return pd.DataFrame(columns=out_cols)
-    if not (np.isfinite(s_land) and np.isfinite(s_built) and np.isfinite(slat) and np.isfinite(slon)):
+
+    if not (
+        np.isfinite(s_land) and np.isfinite(s_built) and
+        np.isfinite(slat)   and np.isfinite(slon)   and
+        s_land > 0 and s_built > 0
+    ):
+        # if we do not have valid size + coords, we cannot build proper comps
         return pd.DataFrame(columns=out_cols)
 
-    subject_type = str(subject.get("type","")).strip().lower()
+    subject_type = str(subject.get("type", "")).strip().lower()
     s_id = subject.get("id")
 
     comps = df.copy()
     comps["similar_id"] = comps["id"].astype(str)
 
+    # normalize numeric types
     comps["_type_norm"] = comps["type"].astype(str).str.strip().str.lower()
-    comps = comps.dropna(subset=["land_m2","built_m2","lat","lon","price"])
-    for c in ["land_m2","built_m2","lat","lon","price","beds","baths"]:
+    comps = comps.dropna(subset=["land_m2", "built_m2", "lat", "lon", "price"])
+    for c in ["land_m2", "built_m2", "lat", "lon", "price", "beds", "baths"]:
         if c in comps.columns:
             comps[c] = pd.to_numeric(comps[c], errors="coerce")
 
+    # same type, not the subject itself
     comps = comps[(comps["_type_norm"] == subject_type) & (comps["id"] != s_id)]
     if comps.empty:
         return pd.DataFrame(columns=out_cols)
 
-    # distance
+    # --- distance calculation ---
     comps["distance_km"] = comps.apply(
         lambda r: haversine_km(slat, slon, float(r["lat"]), float(r["lon"])),
         axis=1
     )
 
-    # --- key change: relative 20% tolerance ---
-    # if subject land is 500 m2 and tol is 0.20 -> allow 500 * 0.20 = 100 m2 deviation
-    land_abs_tol  = s_land * size_tol_land if np.isfinite(s_land) else np.inf
-    built_abs_tol = s_built * size_tol_built if np.isfinite(s_built) else np.inf
+    # --- STRICT percentage tolerance on size ---
+    # Treat values >1 as whole percentages (e.g. 20 -> 0.20)
+    land_tol_frac  = size_tol_land / 100.0 if size_tol_land  > 1 else size_tol_land
+    built_tol_frac = size_tol_built / 100.0 if size_tol_built > 1 else size_tol_built
+
+    # safety: if someone passes negative, clamp to zero
+    land_tol_frac  = max(0.0, land_tol_frac)
+    built_tol_frac = max(0.0, built_tol_frac)
 
     def _within_tol(r):
-        return (
-            abs(float(r["land_m2"]) - s_land)  <= land_abs_tol
-            and
-            abs(float(r["built_m2"]) - s_built) <= built_abs_tol
-        )
+        try:
+            land  = float(r["land_m2"])
+            built = float(r["built_m2"])
+        except Exception:
+            return False
 
+        if not (np.isfinite(land) and np.isfinite(built)):
+            return False
+
+        # relative differences vs subject
+        land_rel_diff  = abs(land  - s_land)  / s_land
+        built_rel_diff = abs(built - s_built) / s_built
+
+        # only keep comps within ±tolerance (default ±20%)
+        return (land_rel_diff <= land_tol_frac) and (built_rel_diff <= built_tol_frac)
+
+    # --- radius growth loop ---
     radius = start_radius_km
     selected = pd.DataFrame()
     pool_final_radius = None
+
     while radius <= max_radius_km:
-        pool = comps[(comps["distance_km"] <= radius) & comps.apply(_within_tol, axis=1)].copy()
+        pool = comps[
+            (comps["distance_km"] <= radius) &
+            comps.apply(_within_tol, axis=1)
+        ].copy()
+
         if len(pool) >= top_n:
             selected = pool.nsmallest(top_n, "distance_km")
             pool_final_radius = radius
             break
         elif len(pool) > 0:
+            # keep the best we have so far, keep expanding radius
             selected = pool.nsmallest(len(pool), "distance_km")
             pool_final_radius = radius
+
         radius += step_km
 
+    # not enough comps within tolerance / radius
     if selected.empty or len(selected) < min_required:
         return pd.DataFrame(columns=out_cols)
 
+    # ensure all required columns exist
     for c in out_cols:
         if c not in selected.columns:
             selected[c] = np.nan
-    return selected.loc[:, out_cols].nsmallest(min(top_n, len(selected)), "distance_km").copy()
+
+    # final: n closest within tolerance
+    return selected.loc[:, out_cols].nsmallest(
+        min(top_n, len(selected)), "distance_km"
+    ).copy()
+
 
 # -------------------- PDF bits --------------------
 def _currency(x) -> str:
@@ -1069,6 +1122,7 @@ if __name__ == "__main__":
     
     #, 
     # EXAMPLE 2 — Subject is NOT in the CSV: pass a CSV-like dict
+    '''
     form_submit = {
         "csv": "properties.csv",
         "out": "reports/cma_new_subject.pdf",
@@ -1083,6 +1137,23 @@ if __name__ == "__main__":
             "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
         },
     }
+    '''
+
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "form address",
+            "Lot size (M^2)": 1000,
+            "Built up size (M^2)": 300,
+            "Bedrooms": 6,
+            "Baths": 5,
+            "Latitude": 12.581671,
+            "Longitude": -70.0424,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
+        },
+    }
+
 
     res = run_cma_from_params(form_submit)
     print(res)
