@@ -52,14 +52,13 @@ class SubjectProperty(BaseModel):
 class CMARequest(BaseModel):
     """Request model for CMA generation"""
     subject: SubjectProperty
-    top_n: Optional[int] = 5
+    top_n: Optional[int] = 3
     start_radius_km: Optional[float] = 1.0
     step_km: Optional[float] = 1.0
-    max_radius_km: Optional[float] = 25.0
-    size_tol_land: Optional[float] = 200.0
-    size_tol_built: Optional[float] = 100.0
+    max_radius_km: Optional[float] = 10.0
+    size_tol_land: Optional[float] = 0.2
+    size_tol_built: Optional[float] = 0.2
     min_required: Optional[int] = 3
-    price_iqr_k: Optional[float] = 0.5
 
 @app.get("/")
 async def root():
@@ -124,7 +123,6 @@ async def generate_cma(request: CMARequest):
             "size_tol_land": request.size_tol_land,
             "size_tol_built": request.size_tol_built,
             "min_required": request.min_required,
-            "price_iqr_k": request.price_iqr_k,
         }
         
         # Generate CMA report
@@ -196,7 +194,6 @@ async def generate_cma_with_pdf(request: CMARequest):
             "size_tol_land": request.size_tol_land,
             "size_tol_built": request.size_tol_built,
             "min_required": request.min_required,
-            "price_iqr_k": request.price_iqr_k,
         }
         
         result = run_cma_from_params(params)
@@ -273,7 +270,6 @@ async def generate_cma_base64(request: CMARequest):
             "size_tol_land": request.size_tol_land,
             "size_tol_built": request.size_tol_built,
             "min_required": request.min_required,
-            "price_iqr_k": request.price_iqr_k,
         }
         
         # Generate CMA report

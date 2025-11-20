@@ -1118,10 +1118,10 @@ if __name__ == "__main__":
         "out": "reports/cma_new_subject.pdf",
         "subject_csv": {
             "ID": "form address",
-            "Lot size (M^2)": 1000,
-            "Built up size (M^2)": 598,
-            "Bedrooms": 6,
-            "Baths": 5,
+            "Lot size (M^2)": 600,
+            "Built up size (M^2)": 150,
+            "Bedrooms": 0,
+            "Baths": 0,
             "Latitude": 12.5506,
             "Longitude": -70.0502,
             "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
