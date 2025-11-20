@@ -39,7 +39,7 @@ def clean_result_dict(data: dict) -> dict:
 
 class SubjectProperty(BaseModel):
     """Subject property details"""
-    id: Optional[str] = "form address"
+    id: Optional[str] = None
     lot_size_m2: float
     built_up_size_m2: float
     bedrooms: int
