@@ -174,6 +174,11 @@ def _subject_from_csv_like(row_dict: Dict[str, Any]) -> pd.Series:
     df_norm = normalize_df_for_comps(df_one)
     if df_norm.empty:
         raise ValueError("Subject dict could not be normalized (missing critical fields?).")
+    
+    orig_id = str(row_dict.get("ID", row_dict.get("id", ""))).strip()
+    if orig_id:
+        df_norm.loc[:, "id"] = orig_id
+
     return df_norm.iloc[0]
 
 
@@ -331,7 +336,7 @@ def build_comps(
     top_n: int = 5,
     start_radius_km: float = 1.0,
     step_km: float = 1.0,
-    max_radius_km: float = 2.5,
+    max_radius_km: float = 10,
     size_tol_land: float = 0.20,   # interpreted as 20% band (see below)
     size_tol_built: float = 0.20,  # interpreted as 20% band (see below)
     min_required: int = 3,
@@ -863,9 +868,10 @@ def generate_cma_report(subject: Dict[str, Any], comps: pd.DataFrame, output_pat
         doc.set_font("Helvetica", "", 10)
         doc.multi_cell(
             0, 6,
-            f"ID: {_extract_id(subject.get('id','-'))}   "
+            #f"ID: {_extract_id(subject.get('id','-'))}   "
+            f"ID: {subject.get('id','-')}   "
             #f"Price: {_currency(ask)}   "
-            f"Beds/Baths: {subject.get('beds','-')}/{subject.get('baths','-')}   "
+            #f"Beds/Baths: {subject.get('beds','-')}/{subject.get('baths','-')}   "
             f"Land: {_num(subject.get('land_m2'),0)} m²   "
             f"Built: {_num(subject.get('built_m2'),0)} m²"
         )
@@ -1026,7 +1032,7 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "top_n": int(params.get("top_n", 3)),
         "start_radius_km": float(params.get("start_radius_km", 1.0)),
         "step_km": float(params.get("step_km", 1.0)),
-        "max_radius_km": float(params.get("max_radius_km", 10)),
+        "max_radius_km": float(params.get("max_radius_km", 20)),
         "size_tol_land": float(params.get("size_tol_land", 0.20)),
         "size_tol_built": float(params.get("size_tol_built", 0.20)),
         "min_required": int(params.get("min_required", 3))
@@ -1113,6 +1119,8 @@ if __name__ == "__main__":
         },
     }
     '''
+
+    '''
     form_submit = {
         "csv": "properties.csv",
         "out": "reports/cma_new_subject.pdf",
@@ -1127,7 +1135,40 @@ if __name__ == "__main__":
             "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
         },
     }
+    '''
 
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Julius Geerman",
+            "Lot size (M^2)": 484,
+            "Built up size (M^2)": 160,
+            "Bedrooms": 3,
+            "Baths": 2,
+            "Latitude": 12.4674061,
+            "Longitude": -69.9706666,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_ec3d3ddc05f541a983bf2084cdfb594c~mv2.png"  
+        },
+    }
+    '''
+
+    #,
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Washington 6b",
+            "Lot size (M^2)": 483,
+            "Built up size (M^2)": 129,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude": 12.5596331,
+            "Longitude": -70.041545,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_402a850cd7244152af98894384f69096~mv2.jpeg"  
+        },
+    }
 
 
     
