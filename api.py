@@ -42,8 +42,8 @@ class SubjectProperty(BaseModel):
     id: Optional[str] = None
     lot_size_m2: float
     built_up_size_m2: float
-    bedrooms: int
-    baths: int
+    #bedrooms: int
+    #baths: int
     latitude: float
     longitude: float
     price: Optional[float] = None
@@ -166,8 +166,8 @@ async def generate_cma_with_pdf(request: CMARequest):
             "ID": request.subject.id,
             "Lot size (M^2)": request.subject.lot_size_m2,
             "Built up size (M^2)": request.subject.built_up_size_m2,
-            "Bedrooms": request.subject.bedrooms,
-            "Baths": request.subject.baths,
+            #"Bedrooms": request.subject.bedrooms,
+            #"Baths": request.subject.baths,
             "Latitude": request.subject.latitude,
             "Longitude": request.subject.longitude,
         }
