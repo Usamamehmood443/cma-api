@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
-# Example Usage (CLI):
-#   py one_time_cma.py --id 5678 --csv properties.csv --out cma.pdf --prepare-export
-#
+
 import argparse
 import math
 import os
@@ -330,6 +328,7 @@ def normalize_df_for_comps(df_raw: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # -------------------- Comps + Stats --------------------
+'''
 def build_comps(
     df: pd.DataFrame,
     subject: pd.Series,
@@ -337,8 +336,8 @@ def build_comps(
     start_radius_km: float = 1.0,
     step_km: float = 1.0,
     max_radius_km: float = 10,
-    size_tol_land: float = 0.20,   # interpreted as 20% band (see below)
-    size_tol_built: float = 0.20,  # interpreted as 20% band (see below)
+    size_tol_land: float = 0.30,   # interpreted as 20% band (see below)
+    size_tol_built: float = 0.30,  # interpreted as 20% band (see below)
     min_required: int = 3,
     price_iqr_k: float = 0.5,
 ) -> pd.DataFrame:
@@ -461,8 +460,131 @@ def build_comps(
     return selected.loc[:, out_cols].nsmallest(
         min(top_n, len(selected)), "distance_km"
     ).copy()
+'''
 
+def build_comps(
+    df: pd.DataFrame,
+    subject: pd.Series,
+    top_n: int = 3,
+    max_radius_km: float = 10.0,
+    min_required: int = 3,
+) -> pd.DataFrame:
+    """
+    K-NN style comparable selection using 3 features:
+      - lot size (land_m2)
+      - built-up size (built_m2)
+      - geographic distance (distance_km)
 
+    Steps:
+      1. Filter to same type as subject and not the subject itself.
+      2. Compute distance_km (haversine) for all candidates.
+      3. Restrict to comps within max_radius_km.
+      4. Compute normalized errors:
+           land_rel  = |land - s_land| / s_land
+           built_rel = |built - s_built| / s_built
+           dist_rel  = distance_km / max_radius_km
+      5. Define KNN distance as Euclidean distance in this 3D space:
+           knn_dist = sqrt(land_rel^2 + built_rel^2 + dist_rel^2)
+      6. Select the top_n comps with smallest knn_dist and return them,
+         sorted by knn_dist (ties then by actual distance_km).
+    """
+
+    out_cols = [
+        "similar_id", "price", "beds", "baths",
+        "land_m2", "built_m2", "distance_km",
+        "status", "lat", "lon", "link"
+    ]
+
+    # --- subject core values ---
+    try:
+        s_land  = float(subject.get("land_m2"))
+        s_built = float(subject.get("built_m2"))
+        slat    = float(subject.get("lat"))
+        slon    = float(subject.get("lon"))
+    except Exception:
+        return pd.DataFrame(columns=out_cols)
+
+    if not (
+        np.isfinite(s_land) and np.isfinite(s_built) and
+        np.isfinite(slat)   and np.isfinite(slon)   and
+        s_land > 0 and s_built > 0
+    ):
+        return pd.DataFrame(columns=out_cols)
+
+    subject_type = str(subject.get("type", "")).strip().lower()
+    s_id = subject.get("id")
+
+    comps = df.copy()
+    comps["similar_id"] = comps["id"].astype(str)
+
+    # normalize types and numeric columns
+    comps["_type_norm"] = comps["type"].astype(str).str.strip().str.lower()
+    comps = comps.dropna(subset=["land_m2", "built_m2", "lat", "lon", "price"])
+    for c in ["land_m2", "built_m2", "lat", "lon", "price", "beds", "baths"]:
+        if c in comps.columns:
+            comps[c] = pd.to_numeric(comps[c], errors="coerce")
+
+    # same type, not the subject itself
+    comps = comps[(comps["_type_norm"] == subject_type) & (comps["id"] != s_id)]
+    if comps.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    # --- distance in km from subject ---
+    comps["distance_km"] = comps.apply(
+        lambda r: haversine_km(slat, slon, float(r["lat"]), float(r["lon"])),
+        axis=1
+    )
+
+    # limit to a reasonable radius
+    comps = comps[comps["distance_km"] <= max_radius_km]
+    if comps.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    # --- normalized errors for the three factors ---
+    comps["land_rel"] = np.abs(comps["land_m2"] - s_land) / s_land
+    comps["built_rel"] = np.abs(comps["built_m2"] - s_built) / s_built
+
+    # normalize distance to [0, 1] by dividing by max_radius_km
+    # clamp to 1.0 just in case
+    comps["dist_rel"] = np.minimum(comps["distance_km"] / max_radius_km, 1.0)
+
+    # drop any rows where rel errors are not finite
+    comps = comps[
+        np.isfinite(comps["land_rel"]) &
+        np.isfinite(comps["built_rel"]) &
+        np.isfinite(comps["dist_rel"])
+    ]
+    if comps.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    # --- 3D KNN distance in (land_rel, built_rel, dist_rel) space ---
+    # Equal weights on the three dimensions
+    comps["knn_dist"] = np.sqrt(
+        comps["land_rel"]**2 +
+        comps["built_rel"]**2 +
+        comps["dist_rel"]**2
+    )
+
+    # sort by KNN distance, then by actual distance_km as a tie-breaker
+    comps_sorted = comps.sort_values(
+        ["knn_dist", "distance_km"],
+        ascending=[True, True]
+    )
+
+    # require a minimum number of comps
+    if len(comps_sorted) < min_required:
+        return pd.DataFrame(columns=out_cols)
+
+    # pick top_n nearest neighbours in 3D error space
+    selected = comps_sorted.head(top_n)
+
+    # ensure all required columns exist
+    for c in out_cols:
+        if c not in selected.columns:
+            selected[c] = np.nan
+
+    # return only the expected columns (you can add knn_dist if you want to see it)
+    return selected.loc[:, out_cols].copy()
 
 # -------------------- PDF bits --------------------
 def _currency(x) -> str:
@@ -1033,10 +1155,11 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "start_radius_km": float(params.get("start_radius_km", 1.0)),
         "step_km": float(params.get("step_km", 1.0)),
         "max_radius_km": float(params.get("max_radius_km", 20)),
-        "size_tol_land": float(params.get("size_tol_land", 0.20)),
-        "size_tol_built": float(params.get("size_tol_built", 0.20)),
+        "size_tol_land": float(params.get("size_tol_land", 0.35)),
+        "size_tol_built": float(params.get("size_tol_built", 0.35)),
         "min_required": int(params.get("min_required", 3))
     }
+
     if not p["csv"]:
         raise ValueError("csv path is required for comps pool.")
 
@@ -1073,11 +1196,11 @@ def run_cma_from_params(params: Dict[str, Any]) -> Dict[str, Any]:
         df_norm, 
         subject,
         top_n=p["top_n"],
-        start_radius_km=p["start_radius_km"],
-        step_km=p["step_km"],
+        #start_radius_km=p["start_radius_km"],
+        #step_km=p["step_km"],
         max_radius_km=p["max_radius_km"],
-        size_tol_land=p["size_tol_land"],
-        size_tol_built=p["size_tol_built"],
+        #size_tol_land=p["size_tol_land"],
+        #size_tol_built=p["size_tol_built"],
         min_required=p["min_required"]
     )
 
@@ -1154,7 +1277,7 @@ if __name__ == "__main__":
     }
     '''
 
-    #,
+    '''
     form_submit = {
         "csv": "properties.csv",
         "out": "reports/cma_new_subject.pdf",
@@ -1169,9 +1292,125 @@ if __name__ == "__main__":
             "Image URL": "https://static.wixstatic.com/media/5711f6_402a850cd7244152af98894384f69096~mv2.jpeg"  
         },
     }
-
-
+    '''
     
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Palm Beach 20f",
+            "Lot size (M^2)": 829,
+            "Built up size (M^2)": 125,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude": 12.5669683,
+            "Longitude": -70.0385344,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_ba5c0e8f671b48ab881c21d6b8cfe9db~mv2.jpg"  
+        },
+    }
+    '''
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Alablanca",
+            "Lot size (M^2)": 682,
+            "Built up size (M^2)": 259,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude": 12.495,
+            "Longitude": -70.007,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_ba5c0e8f671b48ab881c21d6b8cfe9db~mv2.jpg"  
+        },
+    }
+    '''
+
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Alto Vista 21 F",
+            "Lot size (M^2)": 394,
+            "Built up size (M^2)": 117,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude": 12.5681426,
+            "Longitude": -70.0178682,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_e27ddbec4e164482886d5ab9dd3a839b~mv2.jpeg"  
+        },
+    }
+    '''
+
+    #12.5204215,-69.9624395
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Sabanilla Abou, Santa Cruz, Aruba",
+            "Lot size (M^2)": 630,
+            "Built up size (M^2)": 191,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude": 12.5204215,
+            "Longitude": -69.9624395,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_6a1bbfc025864714877aa47653f0e2f5~mv2.jpg"  
+        },
+    }
+    '''
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "TEST",
+            "Lot size (M^2)": 393,
+            "Built up size (M^2)": 119,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude": 12.5591578,
+            "Longitude": -70.0369161,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_6a1bbfc025864714877aa47653f0e2f5~mv2.jpg"  
+        },
+    }
+    '''
+
+    #12.4677805,-69.9748
+    '''
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Pos Chiquito",
+            "Lot size (M^2)": 1590,
+            "Built up size (M^2)": 300,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude":  12.4943138,
+            "Longitude": -70.0102366,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_3bbd3d8bca7f4753a09e62836eb7f209~mv2.jpg"    #missing image
+        },
+    }
+    '''
+
+    form_submit = {
+        "csv": "properties.csv",
+        "out": "reports/cma_new_subject.pdf",
+        "subject_csv": {
+            "ID": "Papilon, Santa Cruz, Aruba",
+            "Lot size (M^2)": 492,
+            "Built up size (M^2)": 81,
+            "Bedrooms": "",
+            "Baths": "",
+            "Latitude":  12.5015525,
+            "Longitude": -69.9883363,
+            "Image URL": "https://static.wixstatic.com/media/5711f6_44408680ef454bf89498dc5b75a33e0f~mv2.jpeg"   
+        },
+    }
+
 
     
     res = run_cma_from_params(form_submit)
