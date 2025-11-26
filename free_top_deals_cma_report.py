@@ -461,32 +461,32 @@ def build_comps(
         min(top_n, len(selected)), "distance_km"
     ).copy()
 '''
-
 def build_comps(
     df: pd.DataFrame,
     subject: pd.Series,
     top_n: int = 3,
     max_radius_km: float = 10.0,
     min_required: int = 3,
+    size_tol: float = 0.40,  # 0.30 = 30% max deviation
 ) -> pd.DataFrame:
     """
-    K-NN style comparable selection using 3 features:
-      - lot size (land_m2)
-      - built-up size (built_m2)
-      - geographic distance (distance_km)
+    K-NN style comparable selection with a hard size constraint:
 
-    Steps:
-      1. Filter to same type as subject and not the subject itself.
-      2. Compute distance_km (haversine) for all candidates.
-      3. Restrict to comps within max_radius_km.
-      4. Compute normalized errors:
-           land_rel  = |land - s_land| / s_land
-           built_rel = |built - s_built| / s_built
-           dist_rel  = distance_km / max_radius_km
-      5. Define KNN distance as Euclidean distance in this 3D space:
-           knn_dist = sqrt(land_rel^2 + built_rel^2 + dist_rel^2)
-      6. Select the top_n comps with smallest knn_dist and return them,
-         sorted by knn_dist (ties then by actual distance_km).
+      - Only keep comps where:
+          |land - s_land|  / s_land  <= size_tol
+          |built - s_built| / s_built <= size_tol
+        (default size_tol = 0.30 → max 30% deviation on BOTH)
+
+      - Then rank remaining comps using 3 features:
+          land_rel  = |land - s_land| / s_land
+          built_rel = |built - s_built| / s_built
+          dist_rel  = distance_km / max_radius_km
+
+        knn_dist = sqrt(land_rel^2 + built_rel^2 + dist_rel^2)
+
+      - Return up to top_n comps with smallest knn_dist.
+      - If fewer than min_required comps satisfy the constraint,
+        return an empty DataFrame.
     """
 
     out_cols = [
@@ -540,42 +540,46 @@ def build_comps(
     if comps.empty:
         return pd.DataFrame(columns=out_cols)
 
-    # --- normalized errors for the three factors ---
+    # --- normalized size errors ---
     comps["land_rel"] = np.abs(comps["land_m2"] - s_land) / s_land
     comps["built_rel"] = np.abs(comps["built_m2"] - s_built) / s_built
 
-    # normalize distance to [0, 1] by dividing by max_radius_km
-    # clamp to 1.0 just in case
-    comps["dist_rel"] = np.minimum(comps["distance_km"] / max_radius_km, 1.0)
+    # convert size_tol if they ever pass 30 instead of 0.30
+    tol_frac = size_tol / 100.0 if size_tol > 1 else size_tol
+    tol_frac = max(0.0, tol_frac)  # safety
 
-    # drop any rows where rel errors are not finite
+    # HARD CONSTRAINT: both lot & built within ±30%
     comps = comps[
         np.isfinite(comps["land_rel"]) &
         np.isfinite(comps["built_rel"]) &
-        np.isfinite(comps["dist_rel"])
+        (comps["land_rel"]  <= tol_frac) &
+        (comps["built_rel"] <= tol_frac)
     ]
     if comps.empty:
         return pd.DataFrame(columns=out_cols)
 
-    # --- 3D KNN distance in (land_rel, built_rel, dist_rel) space ---
-    # Equal weights on the three dimensions
+    # --- distance normalized for KNN metric ---
+    comps["dist_rel"] = np.minimum(comps["distance_km"] / max_radius_km, 1.0)
+    comps = comps[np.isfinite(comps["dist_rel"])]
+    if comps.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    # --- 3D KNN distance (land_rel, built_rel, dist_rel) ---
     comps["knn_dist"] = np.sqrt(
         comps["land_rel"]**2 +
         comps["built_rel"]**2 +
         comps["dist_rel"]**2
     )
 
-    # sort by KNN distance, then by actual distance_km as a tie-breaker
     comps_sorted = comps.sort_values(
         ["knn_dist", "distance_km"],
         ascending=[True, True]
     )
 
-    # require a minimum number of comps
+    # require at least min_required comps that satisfy the 30% rule
     if len(comps_sorted) < min_required:
         return pd.DataFrame(columns=out_cols)
 
-    # pick top_n nearest neighbours in 3D error space
     selected = comps_sorted.head(top_n)
 
     # ensure all required columns exist
@@ -583,8 +587,8 @@ def build_comps(
         if c not in selected.columns:
             selected[c] = np.nan
 
-    # return only the expected columns (you can add knn_dist if you want to see it)
     return selected.loc[:, out_cols].copy()
+
 
 # -------------------- PDF bits --------------------
 def _currency(x) -> str:
@@ -985,15 +989,13 @@ def generate_cma_report(subject: Dict[str, Any], comps: pd.DataFrame, output_pat
         doc.set_auto_page_break(auto=True, margin=12)
         doc.add_page()
 
+        # ---------- SUBJECT BLOCK ----------
         doc.set_font("Helvetica", "B", 12)
         doc.cell(0, 8, "Subject Property", ln=1)
         doc.set_font("Helvetica", "", 10)
         doc.multi_cell(
             0, 6,
-            #f"ID: {_extract_id(subject.get('id','-'))}   "
             f"ID: {subject.get('id','-')}   "
-            #f"Price: {_currency(ask)}   "
-            #f"Beds/Baths: {subject.get('beds','-')}/{subject.get('baths','-')}   "
             f"Land: {_num(subject.get('land_m2'),0)} m²   "
             f"Built: {_num(subject.get('built_m2'),0)} m²"
         )
@@ -1021,6 +1023,47 @@ def generate_cma_report(subject: Dict[str, Any], comps: pd.DataFrame, output_pat
                     pass
         doc.ln(size + 6)
 
+        # ---------- SIZE DEVIATION BANNER (20% THRESHOLD) ----------
+        size_warning = False
+        SIZE_WARNING_THRESHOLD = 0.20  # 20%
+
+        try:
+            s_land = float(subject.get("land_m2") or 0)
+            s_built = float(subject.get("built_m2") or 0)
+
+            if s_land > 0 and s_built > 0 and not comps.empty:
+                land_series = pd.to_numeric(comps["land_m2"], errors="coerce")
+                built_series = pd.to_numeric(comps["built_m2"], errors="coerce")
+
+                land_rel = np.abs(land_series - s_land) / s_land
+                built_rel = np.abs(built_series - s_built) / s_built
+
+                max_rel_land = np.nanmax(land_rel.values) if len(land_rel) > 0 else np.nan
+                max_rel_built = np.nanmax(built_rel.values) if len(built_rel) > 0 else np.nan
+
+                worst_rel = np.nanmax([max_rel_land, max_rel_built])
+                if np.isfinite(worst_rel) and worst_rel > SIZE_WARNING_THRESHOLD:
+                    size_warning = True
+        except Exception:
+            size_warning = False
+
+        if size_warning:
+            doc.ln(1)
+            banner_text = (
+                "Size note: One or more comparable properties differ by more than 20% "
+                "in lot and/or built-up size compared to the subject. The indicated "
+                "price range should be interpreted with caution."
+            )
+            doc.set_font("Helvetica", "", 8)
+            doc.set_fill_color(255, 245, 200)   # light yellow
+            doc.set_text_color(80, 60, 0)       # darkish brown text
+            doc.set_draw_color(230, 210, 150)   # soft border
+            doc.set_x(LEFT_MARGIN)
+            doc.multi_cell(CONTENT_W, 4, banner_text, border=1, fill=True)
+            doc.set_text_color(0, 0, 0)
+            doc.ln(2)
+
+        # ---------- COMPARABLES TABLE ----------
         headers = ["Comparable", "Price", "Beds", "Baths", "Land (m²)", "Built (m²)", "Distance (km)", "Status"]
         aligns  = ["L","R","C","C","R","R","R","C"]
         comps_sorted = comps.sort_values(by="distance_km", ascending=True)
@@ -1037,6 +1080,7 @@ def generate_cma_report(subject: Dict[str, Any], comps: pd.DataFrame, output_pat
                 str(r.get("status")),
             ])
             status_links.append(None)
+
         avg_row = [
             "Averages",
             _currency(pd.to_numeric(comps_sorted["price"], errors="coerce").mean()),
@@ -1048,18 +1092,32 @@ def generate_cma_report(subject: Dict[str, Any], comps: pd.DataFrame, output_pat
             "",
         ]
         rows.append(avg_row); status_links.append(None)
-        _table_fullwidth(doc, headers, rows, alignments=aligns, avg_row_index=len(rows)-1, link_col_idx=7, link_targets=status_links)
+        _table_fullwidth(
+            doc, headers, rows,
+            alignments=aligns,
+            avg_row_index=len(rows)-1,
+            link_col_idx=7,
+            link_targets=status_links
+        )
 
+        # ---------- KPIs + SUMMARY ----------
         doc.ln(2)
         _kpi_triptych_range(doc, low_val=low_price, avg_val=avg_price, high_val=high_price)
 
         doc.ln(11)
         summary_text = _build_summary_text(subject, comps_sorted, ask, avg_price, disc_abs, disc_pct)
-        doc.set_font("Helvetica", "B", 12); doc.set_text_color(*BRAND_BLACK); doc.cell(0, 8, "Market Analysis", ln=1)
-        doc.set_font("Helvetica", "", 10);  doc.set_text_color(0, 0, 0);     doc.multi_cell(0, 6, summary_text)
+        doc.set_font("Helvetica", "B", 12)
+        doc.set_text_color(*BRAND_BLACK)
+        doc.cell(0, 8, "Market Analysis", ln=1)
+        doc.set_font("Helvetica", "", 10)
+        doc.set_text_color(0, 0, 0)
+        doc.multi_cell(0, 6, summary_text)
+
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         doc.output(output_path)
+
     return ask, avg_price, disc_pct, disc_abs, low_price, high_price
+
 
 # -------------------- Export builder --------------------
 def build_export(df_norm: pd.DataFrame) -> pd.DataFrame:
@@ -1396,6 +1454,7 @@ if __name__ == "__main__":
     }
     '''
 
+    
     form_submit = {
         "csv": "properties.csv",
         "out": "reports/cma_new_subject.pdf",
@@ -1410,6 +1469,7 @@ if __name__ == "__main__":
             "Image URL": "https://static.wixstatic.com/media/5711f6_44408680ef454bf89498dc5b75a33e0f~mv2.jpeg"   
         },
     }
+    
 
 
     
